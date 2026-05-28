@@ -96,6 +96,123 @@ def _lookup_supports_vision(provider: str, model: str) -> Optional[bool]:
     return bool(caps.supports_vision)
 
 
+def _model_slug_matches(entry: Dict[str, Any], model: str) -> bool:
+    """Best-effort match for model entries in user config."""
+    wanted = str(model or "").strip()
+    if not wanted:
+        return False
+    candidates = [
+        entry.get("id"),
+        entry.get("model"),
+        entry.get("name"),
+        entry.get("slug"),
+    ]
+    return any(str(c or "").strip() == wanted for c in candidates)
+
+
+def _entry_declares_image_input(entry: Dict[str, Any]) -> Optional[bool]:
+    """Read per-model image input support from config metadata.
+
+    Supports both the user's compact shape:
+      {"id": "gpt-5.5", "input": ["text", "image"]}
+
+    and models.dev-style metadata:
+      {"modalities": {"input": ["text", "image"]}}
+    """
+    if not isinstance(entry, dict):
+        return None
+
+    raw_input = entry.get("input")
+    if raw_input is None:
+        modalities = entry.get("modalities")
+        if isinstance(modalities, dict):
+            raw_input = modalities.get("input")
+
+    if raw_input is None:
+        return None
+    if isinstance(raw_input, str):
+        values = {raw_input.lower()}
+    elif isinstance(raw_input, (list, tuple, set)):
+        values = {str(v).lower() for v in raw_input}
+    else:
+        return None
+
+    if "image" in values or "vision" in values:
+        return True
+    if values and all(v not in {"image", "vision"} for v in values):
+        return False
+    return None
+
+
+def _lookup_configured_model_supports_vision(
+    provider: str,
+    model: str,
+    cfg: Optional[Dict[str, Any]],
+) -> Optional[bool]:
+    """Resolve vision support from user-defined provider metadata.
+
+    This covers custom OpenAI-compatible providers whose models are not in
+    models.dev yet. We only trust explicit per-model metadata; absent metadata
+    returns None so the normal safe fallback remains text mode.
+    """
+    if not isinstance(cfg, dict) or not provider or not model:
+        return None
+
+    provider_keys = {str(provider).strip().lower()}
+
+    providers = cfg.get("providers")
+    if isinstance(providers, dict):
+        provider_cfg = providers.get(provider)
+        if provider_cfg is None:
+            for key, value in providers.items():
+                if str(key).strip().lower() in provider_keys:
+                    provider_cfg = value
+                    break
+        if isinstance(provider_cfg, dict):
+            result = _scan_configured_models_for_vision(provider_cfg.get("models"), model)
+            if result is not None:
+                return result
+
+    custom_providers = cfg.get("custom_providers")
+    if isinstance(custom_providers, list):
+        for cp in custom_providers:
+            if not isinstance(cp, dict):
+                continue
+            names = {
+                str(cp.get("provider") or "").strip().lower(),
+                str(cp.get("slug") or "").strip().lower(),
+                str(cp.get("name") or "").strip().lower(),
+            }
+            if provider_keys.isdisjoint(names):
+                continue
+            result = _scan_configured_models_for_vision(cp.get("models"), model)
+            if result is not None:
+                return result
+
+    return None
+
+
+def _scan_configured_models_for_vision(models: Any, model: str) -> Optional[bool]:
+    if isinstance(models, dict):
+        # Supports either {"gpt-5.5": {...}} or {"gpt-5.5": ["text", "image"]}.
+        for key, value in models.items():
+            if str(key).strip() != str(model).strip():
+                continue
+            if isinstance(value, dict):
+                return _entry_declares_image_input({"id": key, **value})
+            return _entry_declares_image_input({"id": key, "input": value})
+        return None
+
+    if isinstance(models, list):
+        for entry in models:
+            if isinstance(entry, str):
+                continue
+            if not isinstance(entry, dict) or not _model_slug_matches(entry, model):
+                continue
+            return _entry_declares_image_input(entry)
+    return None
+
+
 def decide_image_input_mode(
     provider: str,
     model: str,
@@ -125,6 +242,12 @@ def decide_image_input_mode(
 
     supports = _lookup_supports_vision(provider, model)
     if supports is True:
+        return "native"
+    if supports is False:
+        return "text"
+
+    configured_supports = _lookup_configured_model_supports_vision(provider, model, cfg)
+    if configured_supports is True:
         return "native"
     return "text"
 

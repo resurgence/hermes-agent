@@ -94,6 +94,63 @@ class TestDecideImageInputMode:
         with patch("agent.image_routing._lookup_supports_vision", return_value=None):
             assert decide_image_input_mode("openrouter", "brand-new-slug", {}) == "text"
 
+    def test_auto_uses_provider_model_input_image_metadata_when_registry_unknown(self):
+        """Custom provider configs can declare image input support.
+
+        Regression: blueroy/gpt-5.5 was configured with input=["text", "image"],
+        but it was unknown to models.dev, so auto mode incorrectly fell back
+        to text-mode vision_analyze instead of native image_url parts.
+        """
+        cfg = {
+            "providers": {
+                "blueroy": {
+                    "models": [
+                        {
+                            "id": "gpt-5.5",
+                            "name": "GPT-5.5",
+                            "input": ["text", "image"],
+                        }
+                    ]
+                }
+            }
+        }
+        with patch("agent.image_routing._lookup_supports_vision", return_value=None):
+            assert decide_image_input_mode("blueroy", "gpt-5.5", cfg) == "native"
+
+    def test_auto_uses_custom_provider_modalities_image_metadata_when_registry_unknown(self):
+        cfg = {
+            "custom_providers": [
+                {
+                    "name": "BlueRoy",
+                    "provider": "blueroy",
+                    "models": [
+                        {
+                            "id": "gpt-5.5",
+                            "modalities": {"input": ["text", "image"]},
+                        }
+                    ],
+                }
+            ]
+        }
+        with patch("agent.image_routing._lookup_supports_vision", return_value=None):
+            assert decide_image_input_mode("blueroy", "gpt-5.5", cfg) == "native"
+
+    def test_auto_uses_text_for_provider_text_only_model_metadata_when_registry_unknown(self):
+        cfg = {
+            "providers": {
+                "local": {
+                    "models": [
+                        {
+                            "id": "text-only",
+                            "input": ["text"],
+                        }
+                    ]
+                }
+            }
+        }
+        with patch("agent.image_routing._lookup_supports_vision", return_value=None):
+            assert decide_image_input_mode("local", "text-only", cfg) == "text"
+
     def test_auto_respects_aux_vision_override_even_for_vision_model(self):
         """If the user configured a dedicated vision backend, don't bypass it."""
         cfg = {"auxiliary": {"vision": {"provider": "openrouter", "model": "google/gemini-2.5-flash"}}}
